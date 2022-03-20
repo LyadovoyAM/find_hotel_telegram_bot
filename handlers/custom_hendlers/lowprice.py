@@ -8,9 +8,11 @@ from rapidapi import find_hotels, find_photo_url
 from telegram_bot_calendar import DetailedTelegramCalendar, LSTEP
 import datetime
 from utils.change_language_date import change_language_date
+from database.history_db import Request, HotelsInfo
 
-logger.add('debug.log', format='{time} {level} {message}', level='INFO')
-
+logger.add('debug.log', format='{time} {level} {message}', level='DEBUG')
+Request.create_table()
+HotelsInfo.create_table()
 
 # TODO Некоторые функции из lowprice будут использоваться в highprice и bestdeal. Лучше универсальные функции выделить
 #  в отдельный файл или можно импортировать и ссылаться на этот?
@@ -22,6 +24,8 @@ def lowprice(message: Message) -> None:
     """Функция обработчик команды /lowprice. Отправляет пользователю сообщение с запросом названия города."""
     bot.set_state(message.from_user.id, UserInfoState.name_city, message.chat.id)
     bot.send_message(message.from_user.id, 'Введите название города для поиска отелей')
+    with bot.retrieve_data(message.from_user.id, message.chat.id) as data:
+        data['command'] = message.text
 
 
 @bot.message_handler(state=UserInfoState.name_city)
@@ -30,6 +34,8 @@ def choice_city(message: Message) -> None:
     """Функция получения информации о названии населенного пункта. Вызывает функцию city_markup и выводит клавиатуру
      с вариантами найденными на rapidapi. Сохраняет информацию о введенном населенном пункте пользователем в виде строки
      в словарь c ключом 'name_city'."""
+    with bot.retrieve_data(message.from_user.id, message.chat.id) as data:
+        data['request'] = Request.create(user_id=message.from_user.id, command=data['command'], city=message.text)
     new_markup = city_markup(message.text)
     if new_markup is not None:
         bot.send_message(message.from_user.id, 'Выберите ваш вариант, пожалуйста:',
@@ -176,6 +182,7 @@ def send_hotels_info(message: Message) -> None:
         #  а перед выводом сообщения проверяю на not None. Это нормальное решение или есть вариант "поизящнее"
         for new_massage in new_massages:
             bot.send_message(message.chat.id, new_massage[1])
+            hotels_info = HotelsInfo.create(request_id=data['request'], text_message=new_massage[1])
             if get_photo:
                 photo_paths = find_photo_url(hotel_id=new_massage[0], photo_number=number_photo)
                 for photo_path in photo_paths:
