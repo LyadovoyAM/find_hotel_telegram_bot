@@ -1,15 +1,14 @@
 import json
 import requests
-from dotenv import load_dotenv
 from config_data.config import RAPID_API_KEY
 import re
 from loguru import logger
 from utils.low_high_price_create_message import make_low_high_price_info_message
 from utils.create_photo_url import make_photo_url
+from utils.bestdeal_create_message import make_bestdeal_message
+from utils.calculate_number_days import calculate_days
 
 logger.add('debug.log', format='{time} {level} {message}', level='DEBUG')
-
-load_dotenv()
 
 
 @logger.catch
@@ -31,7 +30,7 @@ def find_city_id(user_town: str) -> list:
     """Функция формирования и обработки запроса с названием города. Возвращает список из словарей с названием найденных
     вариантов и их ID"""
     url_locate = "https://hotels4.p.rapidapi.com/locations/v2/search"
-    querystring_locate = {"query": user_town, "locale": "en_US", "currency": "USD"}
+    querystring_locate = {"query": user_town, "locale": "ru_RU", "currency": "USD"}
     headers_locate = {
         'x-rapidapi-host': "hotels4.p.rapidapi.com",
         'x-rapidapi-key': RAPID_API_KEY
@@ -40,7 +39,6 @@ def find_city_id(user_town: str) -> list:
     pattern = r'(?<="CITY_GROUP",).+?[\]]'
     find = re.search(pattern, request)
     if find:
-        # TODO Не совсем понял как работает f"{{{find[0]}}}" с json.loads. Сам информацию к сожалению не нашел.
         suggestions = json.loads(f"{{{find[0]}}}")
         cities = list()
         try:
@@ -50,20 +48,21 @@ def find_city_id(user_town: str) -> list:
                     result_destination = ''.join([city_info['name'], ',', result_destination])
                 cities.append({'city_name': result_destination, 'destination_id': city_info['destinationId']})
             return cities
-# TODO Везде где обрабатываю запрос по ключам поставил проверку на KeyError, хотя есть проверка через регулярные выражения,
-#  мне пока эта ошибка не выпадала. Стоит ли оставить или может убрать
-
         except KeyError:
             return None
 
 
 @logger.catch
-def find_hotels(city_id: str, hotel_number: str, arrival_date: str, date_departure: str) -> list:
+def find_hotels(city_id: str, hotel_number: str, arrival_date: str, date_departure: str, command: str) -> list:
     """Функция формирования и обработки запроса по поиску отелей. Словарь с информацией об отелях обрабатывается
     с помощью функции make_low_high_price_info_message. возвращает список со списками из ID отеля и строкой с сообщением"""
     url = "https://hotels4.p.rapidapi.com/properties/list"
+    if command == '/lowprice':
+        sort_order = "PRICE"
+    else:
+        sort_order = "PRICE_HIGHEST_FIRST"
     querystring = {"destinationId": city_id, "pageNumber": "1", "pageSize": hotel_number, "checkIn": arrival_date,
-                   "checkOut": date_departure, "adults1": "1", "sortOrder": "PRICE", "locale": "en_EN",
+                   "checkOut": date_departure, "adults1": "1", "sortOrder": sort_order, "locale": "en_EN",
                    "currency": "USD"}
     headers = {
         'x-rapidapi-host': "hotels4.p.rapidapi.com",
@@ -102,3 +101,44 @@ def find_photo_url(hotel_id: str, photo_number: int) -> list:
         return photo_url
     else:
         return None
+
+
+@logger.catch
+def find_hotels_bestdeal(city_id: str, hotel_number: int, arrival_date: str, date_departure: str,
+                         distance_min: int, distance_max: int, price_min: str, price_max: str) -> list:
+    """Функция формирования и обработки запроса по поиску отелей. Словарь с информацией об отелях обрабатывается
+    с помощью функции make_bestdeal_message. возвращает список со списками из ID отеля и строкой с сообщением.
+    Проверяет количество найденных результатов с количеством заданным пользователем, при необходимости отправляет повторный запрос
+    со следующей страницы"""
+    page_number = 1
+    new_messages = []
+    number_days = calculate_days(arrival_date=arrival_date, date_departure=date_departure)
+    while True:
+        url = "https://hotels4.p.rapidapi.com/properties/list"
+        querystring = {"destinationId": city_id, "pageNumber": str(page_number), "pageSize": "25", "checkIn": arrival_date,
+                       "checkOut": date_departure, "adults1": "1", "priceMin": price_min, "priceMax": price_max,
+                       "sortOrder": "DISTANCE_FROM_LANDMARK", "locale": "en_EN", "currency": "USD",
+                       "landmarkIds": "city center"}
+
+        headers = {
+            'x-rapidapi-host': "hotels4.p.rapidapi.com",
+            'x-rapidapi-key': RAPID_API_KEY
+        }
+        response = request_to_api(url=url,  headers=headers, querystring=querystring)
+        low_price_find = re.search(r'(?<=,)"searchResults":.+?(?=,"sortResults)', response)
+        try:
+            if low_price_find:
+                search_results = json.loads(f"{{{low_price_find[0]}}}")
+                results = search_results['searchResults']
+                messages = make_bestdeal_message(results, hotel_number, distance_min, distance_max, number_days)
+                new_messages.extend(messages)
+            else:
+                return None
+            pagination = search_results['searchResults']['pagination']
+            if len(new_messages) >= hotel_number or pagination.get('currentPage') == pagination.get('nextPageNumber', page_number):
+                break
+            else:
+                page_number += 1
+        except KeyError:
+            return None
+    return new_messages[:hotel_number]
